@@ -13,13 +13,21 @@ import time
 
 st.set_page_config(page_title="JARVIS: Forex CEO", page_icon="💼", layout="wide")
 
+# 🌟 GLOBAL AUDIO BRIDGE STATE (Bypasses Streamlit's proxy limits entirely)
+if 'jarvis_shared_state' not in globals():
+    globals()['jarvis_shared_state'] = {
+        'pending_prompt': None,
+        'processing_command': False
+    }
+
+SHARED_STATE = globals()['jarvis_shared_state']
+
 # Persistent Audio Engine Safe Init with Male Voice Configuration
 if "tts_engine" not in st.session_state:
     try:
         engine = pyttsx3.init()
         voices = engine.getProperty('voices')
         
-        # Look for a native male voice option on macOS (typically index 0 or named 'Alex')
         male_voice_found = False
         for voice in voices:
             if "alex" in voice.name.lower() or "male" in voice.name.lower():
@@ -27,9 +35,9 @@ if "tts_engine" not in st.session_state:
                 male_voice_found = True
                 break
         if not male_voice_found and len(voices) > 0:
-            engine.setProperty('voice', voices[0].id) # Fallback to first available
+            engine.setProperty('voice', voices[0].id)
             
-        engine.setProperty('rate', 180) # Crisp, natural cadence
+        engine.setProperty('rate', 180) 
         st.session_state.tts_engine = engine
     except Exception:
         st.session_state.tts_engine = None
@@ -42,47 +50,38 @@ def speak_text(text):
         except Exception as e:
             print(f"[TTS Error]: {e}")
 
-# Continuous Background Listening Daemon Engine
+# Continuous Background Listening Engine (Now using 100% thread-safe global dictionaries)
 def background_voice_listener():
     recognizer = sr.Recognizer()
     mic = sr.Microphone()
     
-    # Calibrate for environmental noise floor gently
     with mic as source:
         recognizer.adjust_for_ambient_noise(source, duration=1.0)
     
     while True:
-        # Only poll the room audio if JARVIS isn't already actively thinking/processing a prompt
-        if not st.session_state.get("processing_command", False):
+        # Check global memory state without triggering a Streamlit exception
+        if not SHARED_STATE['processing_command']:
             with mic as source:
                 try:
-                    # Snappy listen phase strictly watching for the wake word
                     audio = recognizer.listen(source, timeout=2.0, phrase_time_limit=2.5)
                     text = recognizer.recognize_google(audio).lower()
                     
                     if "jarvis" in text or "hey jarvis" in text:
-                        st.session_state.wake_triggered = True
                         speak_text("Online. Systems operational, CEO.")
                         
-                        # Immediately listen for the follow-up executive command
-                        st.toast("🎙️ JARVIS Active! Listening to your command, CEO...")
+                        # Instantly lock down and listen to the real command phrase
                         cmd_audio = recognizer.listen(source, timeout=4.0, phrase_time_limit=6.0)
                         command_text = recognizer.recognize_google(cmd_audio)
                         
                         if command_text:
-                            st.session_state.pending_prompt = command_text
-                            st.session_state.processing_command = True
-                            break # Break loop temporarily to force Main UI update thread
+                            SHARED_STATE['pending_prompt'] = command_text
+                            SHARED_STATE['processing_command'] = True
                 except Exception:
                     pass
         time.sleep(0.1)
 
-# Spawn the isolated background ear thread exactly once when the web server registers
+# Spawn the background listening daemon purely on standard Python runtime execution
 if "voice_thread_spawned" not in st.session_state:
-    st.session_state.wake_triggered = False
-    st.session_state.pending_prompt = None
-    st.session_state.processing_command = False
-    
     listener_thread = threading.Thread(target=background_voice_listener, daemon=True)
     listener_thread.start()
     st.session_state.voice_thread_spawned = True
@@ -106,7 +105,7 @@ st.sidebar.info(f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}")
 # ==========================================
 if page == "Core AI Assistant":
     st.title("🤖 JARVIS Core Terminal")
-    st.caption("Offline Local Intelligence Engine — Passive Background Thread Listening")
+    st.caption("Offline Local Intelligence Engine — Isolated Background Daemon Loop")
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -117,30 +116,29 @@ if page == "Core AI Assistant":
         st.markdown("### Terminal State")
         st.success("🟢 Listening for 'Hey Jarvis'...")
         st.markdown("---")
-        if st.button("🗑️ Clear Terminal Cache", use_container_width=True):
+        if st.button("🗑️ Clear Terminal Cache", width="stretch"):
             st.session_state.messages = []
             st.rerun()
 
     with chat_col:
-        # Display conversation history panels
         for message in st.session_state.messages:
             if message["role"] != "system":
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
-    # Collect inputs from either the background ear thread or standard text bar backup
     user_prompt = None
 
-    if st.session_state.pending_prompt:
-        user_prompt = st.session_state.pending_prompt
-        # Reset state parameters immediately
-        st.session_state.pending_prompt = None
+    # Check if our global background voice thread deposited a prompt payload
+    if SHARED_STATE['pending_prompt']:
+        user_prompt = SHARED_STATE['pending_prompt']
+        # Immediately wipe it from the global exchange register
+        SHARED_STATE['pending_prompt'] = None
     else:
+        # Fallback text input bar
         text_query = st.chat_input("Or type a directive here, CEO...")
         if text_query:
             user_prompt = text_query
 
-    # Execute text token processing through the Ollama pipeline safely
     if user_prompt:
         with chat_col:
             with st.chat_message("user"):
@@ -158,7 +156,6 @@ if page == "Core AI Assistant":
                         )
                         
                         conversation_payload = [{'role': 'system', 'content': system_instruction}]
-                        # Append only the last 4 exchanges to keep processing fast and lag-free
                         conversation_payload.extend(st.session_state.messages[-4:])
                         
                         response = ollama.chat(model='phi3:mini', messages=conversation_payload)
@@ -167,21 +164,16 @@ if page == "Core AI Assistant":
                         st.markdown(response_text)
                         st.session_state.messages.append({"role": "assistant", "content": response_text})
                         
-                        # Clear flag blocks before talking out loud to turn the ears back on cleanly next loop
-                        st.session_state.processing_command = False
+                        # Release the lock so the background mic can look for "Hey Jarvis" again
+                        SHARED_STATE['processing_command'] = False
                         speak_text(response_text)
-                        
-                        # Re-spawn background monitoring loop thread seamlessly
-                        listener_thread = threading.Thread(target=background_voice_listener, daemon=True)
-                        listener_thread.start()
-                        
                         st.rerun()
                         
                     except Exception as e:
                         st.error(f"Execution Delay: {e}")
-                        st.session_state.processing_command = False
+                        SHARED_STATE['processing_command'] = False
 
-    # Soft pacing delay to keep Streamlit's web rendering thread alive and listening 
+    # Soft frame pace tick to seamlessly pull down background global audio values
     time.sleep(0.2)
     st.rerun()
 
@@ -206,7 +198,7 @@ elif page == "Student Management":
     col2.metric("Pending Renewals", "1")
     
     st.markdown("### Active Roster")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 
 # ==========================================
